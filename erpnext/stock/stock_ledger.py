@@ -494,13 +494,21 @@ def get_items_to_be_repost(voucher_type=None, voucher_no=None, doc=None, reposti
 		items_to_be_repost = json.loads(doc.items_to_be_repost)
 
 	if not items_to_be_repost and voucher_type and voucher_no:
-		items_to_be_repost = frappe.db.get_all(
+		# one row per (item_code, warehouse), the earliest by creation; done in Python because
+		# Postgres rejects non-aggregated columns under GROUP BY (MariaDB tolerated it)
+		seen = set()
+		items_to_be_repost = []
+		for row in frappe.db.get_all(
 			"Stock Ledger Entry",
 			filters={"voucher_type": voucher_type, "voucher_no": voucher_no},
 			fields=["item_code", "warehouse", "posting_date", "posting_time", "creation", "posting_datetime"],
 			order_by="creation asc",
-			group_by="item_code, warehouse",
-		)
+		):
+			key = (row.item_code, row.warehouse)
+			if key in seen:
+				continue
+			seen.add(key)
+			items_to_be_repost.append(row)
 
 	return items_to_be_repost or []
 

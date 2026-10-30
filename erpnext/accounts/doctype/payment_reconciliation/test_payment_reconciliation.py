@@ -2007,7 +2007,7 @@ class TestPaymentReconciliation(ERPNextTestSuite):
 	def test_reconciliation_on_closed_period_payment(self):
 		# create backdated fiscal year
 		first_fy_start_date = frappe.db.get_value(
-			"Fiscal Year", {"disabled": 0}, [{"MIN": "year_start_date"}]
+			"Fiscal Year", {"disabled": 0}, [{"MIN": "year_start_date"}], order_by=None
 		)
 		prev_fy_start_date = add_years(first_fy_start_date, -1)
 		prev_fy_end_date = add_days(first_fy_start_date, -1)
@@ -2189,7 +2189,7 @@ class TestPaymentReconciliation(ERPNextTestSuite):
 			as_dict=True,
 		)
 		first_fy_start_date = frappe.db.get_value(
-			"Fiscal Year", {"disabled": 0}, [{"MIN": "year_start_date"}]
+			"Fiscal Year", {"disabled": 0}, [{"MIN": "year_start_date"}], order_by=None
 		)
 		prev_fy_start_date = add_years(first_fy_start_date, -1)
 		prev_fy_end_date = add_days(first_fy_start_date, -1)

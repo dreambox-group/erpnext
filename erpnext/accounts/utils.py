@@ -13,7 +13,7 @@ from frappe.desk.reportview import build_match_conditions
 from frappe.model.meta import get_field_precision
 from frappe.model.naming import determine_consecutive_week_number
 from frappe.query_builder import AliasedQuery, Case, Criterion, Field, Table
-from frappe.query_builder.functions import Count, IfNull, Max, Round, Sum
+from frappe.query_builder.functions import Count, IfNull, Max, Min, Round, Sum
 from frappe.query_builder.utils import DocType
 from frappe.utils import (
 	add_days,
@@ -1228,7 +1228,7 @@ def get_held_invoices(party_type, party):
 
 	if party_type == "Supplier":
 		held_invoices = frappe.db.sql(
-			"select name from `tabPurchase Invoice` where on_hold = 1 and release_date IS NOT NULL and release_date > CURDATE()",
+			"select name from `tabPurchase Invoice` where on_hold = 1 and release_date IS NOT NULL and release_date > CURRENT_DATE",
 			as_dict=1,
 		)
 		held_invoices = set(d["name"] for d in held_invoices)
@@ -2340,8 +2340,9 @@ class QueryPaymentLedger:
 				.where(Criterion.all(self.dimensions_filter))
 				.where(Criterion.all(self.voucher_posting_date))
 				.groupby(ple.against_voucher_type, ple.against_voucher_no, ple.party_type, ple.party)
-				.orderby(ple.invoice_date, ple.voucher_no)
-				.having(qb.Field("amount_in_account_currency") > 0)
+				# the selected values, not the ungrouped columns (Postgres refuses those)
+				.orderby(Field("invoice_date"), Field("voucher_no"))
+				.having(Sum(ple.amount_in_account_currency) > 0)
 				.limit(self.limit)
 				.run()
 			)
@@ -2352,7 +2353,13 @@ class QueryPaymentLedger:
 				)
 
 		# build query for voucher amount
-		query_voucher_amount = (
+		# account is grouped, not aggregated: it is a join key against the outstanding CTE below, and
+		# it fixes the currency the amounts are summed in. The two CTEs aggregate over different row
+		# sets, so two Max() picks could disagree and the join would silently miss, leaving the
+		# outstanding NULL. posting_date/due_date are dates, so Max() there cannot depend on
+		# collation. cost_center and remarks are free text that genuinely varies per row, so they
+		# come off one real row instead -- see representative below.
+		grouped_voucher_amount = (
 			qb.from_(ple)
 			.select(
 				ple.account,
@@ -2360,41 +2367,64 @@ class QueryPaymentLedger:
 				ple.voucher_no,
 				ple.party_type,
 				ple.party,
-				ple.posting_date,
-				ple.due_date,
-				ple.account_currency.as_("currency"),
-				ple.cost_center.as_("cost_center"),
+				Max(ple.posting_date).as_("posting_date"),
+				Max(ple.due_date).as_("due_date"),
+				Max(ple.account_currency).as_("currency"),
 				Sum(ple.amount).as_("amount"),
 				Sum(ple.amount_in_account_currency).as_("amount_in_account_currency"),
-				ple.remarks,
+				Min(ple.name).as_("representative"),
 			)
 			.where(ple.delinked == 0)
 			.where(Criterion.all(filter_on_voucher_no))
 			.where(Criterion.all(self.common_filter))
 			.where(Criterion.all(self.dimensions_filter))
 			.where(Criterion.all(self.voucher_posting_date))
-			.groupby(ple.voucher_type, ple.voucher_no, ple.party_type, ple.party)
+			.groupby(ple.account, ple.voucher_type, ple.voucher_no, ple.party_type, ple.party)
+		).as_("grouped")
+
+		# KNOWN DIVERGENCE: Min(name) is a text sort. Hash names are not reliably lower case -- the
+		# trace-id prefix is not lowered -- so the engines can pick different rows here.
+		representative_ple = qb.DocType("Payment Ledger Entry").as_("representative_ple")
+		query_voucher_amount = (
+			qb.from_(grouped_voucher_amount)
+			.inner_join(representative_ple)
+			.on(representative_ple.name == grouped_voucher_amount.representative)
+			.select(
+				grouped_voucher_amount.account,
+				grouped_voucher_amount.voucher_type,
+				grouped_voucher_amount.voucher_no,
+				grouped_voucher_amount.party_type,
+				grouped_voucher_amount.party,
+				grouped_voucher_amount.posting_date,
+				grouped_voucher_amount.due_date,
+				grouped_voucher_amount.currency,
+				grouped_voucher_amount.amount,
+				grouped_voucher_amount.amount_in_account_currency,
+				representative_ple.cost_center.as_("cost_center"),
+				representative_ple.remarks.as_("remarks"),
+			)
 		)
 
 		# build query for voucher outstanding
 		query_voucher_outstanding = (
 			qb.from_(ple)
 			.select(
+				# grouped, not aggregated: this is the other side of the join key -- see above
 				ple.account,
 				ple.against_voucher_type.as_("voucher_type"),
 				ple.against_voucher_no.as_("voucher_no"),
 				ple.party_type,
 				ple.party,
-				ple.posting_date,
-				ple.due_date,
-				ple.account_currency.as_("currency"),
+				Max(ple.posting_date).as_("posting_date"),
+				Max(ple.due_date).as_("due_date"),
+				Max(ple.account_currency).as_("currency"),
 				Sum(ple.amount).as_("amount"),
 				Sum(ple.amount_in_account_currency).as_("amount_in_account_currency"),
 			)
 			.where(ple.delinked == 0)
 			.where(Criterion.all(filter_on_against_voucher_no))
 			.where(Criterion.all(self.common_filter))
-			.groupby(ple.against_voucher_type, ple.against_voucher_no, ple.party_type, ple.party)
+			.groupby(ple.account, ple.against_voucher_type, ple.against_voucher_no, ple.party_type, ple.party)
 		)
 
 		# build CTE for combining voucher amount and outstanding
@@ -2436,17 +2466,19 @@ class QueryPaymentLedger:
 
 		# build CTE filter
 		# only fetch invoices
+		# The combined CTE query has no GROUP BY, so these are row filters. MariaDB tolerates HAVING
+		# on a select alias here, but postgres does not; express them as WHERE on the source column.
 		if self.get_invoices:
 			self.cte_query_voucher_amount_and_outstanding = (
-				self.cte_query_voucher_amount_and_outstanding.having(
-					qb.Field("outstanding_in_account_currency") > 0
+				self.cte_query_voucher_amount_and_outstanding.where(
+					Table("outstanding").amount_in_account_currency > 0
 				)
 			)
 		# only fetch payments
 		elif self.get_payments:
 			self.cte_query_voucher_amount_and_outstanding = (
-				self.cte_query_voucher_amount_and_outstanding.having(
-					qb.Field("outstanding_in_account_currency") < 0
+				self.cte_query_voucher_amount_and_outstanding.where(
+					Table("outstanding").amount_in_account_currency < 0
 				)
 			)
 

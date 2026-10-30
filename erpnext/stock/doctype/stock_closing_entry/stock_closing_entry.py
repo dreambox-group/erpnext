@@ -28,7 +28,10 @@ def apply_unscoped_filters(filters):
 
 def get_closing_entry_for_closed_period(company):
 	closed_upto = frappe.db.get_value(
-		"Period Closing Voucher", {"docstatus": 1, "company": company}, [{"MAX": "period_end_date"}]
+		"Period Closing Voucher",
+		{"docstatus": 1, "company": company},
+		[{"MAX": "period_end_date"}],
+		order_by=None,
 	)
 	if not closed_upto:
 		return None
@@ -125,6 +128,7 @@ class StockClosingEntry(Document):
 			"Stock Ledger Entry",
 			{"company": self.company, "is_cancelled": 0, "docstatus": 1},
 			[{"MIN": "posting_date"}],
+			order_by=None,
 		)
 
 		self.from_date = first_posting_date or self.to_date

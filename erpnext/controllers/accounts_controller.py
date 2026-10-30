@@ -2459,6 +2459,7 @@ class AccountsController(TransactionBase):
 			.where(adv.delinked == 0)
 			.where(adv.against_voucher_type == self.doctype)
 			.where(adv.against_voucher_no == self.name)
+			.groupby(adv.currency)
 			.run(as_dict=True)
 		)
 
@@ -2490,6 +2491,7 @@ class AccountsController(TransactionBase):
 				"docstatus": 1,
 			},
 			fieldname=Sum(PaymentRequest.grand_total - PaymentRequest.outstanding_amount),
+			order_by=None,
 		)
 
 		if not paid_amount:
