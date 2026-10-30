@@ -128,6 +128,7 @@ class StockClosingEntry(Document):
 			"Stock Ledger Entry",
 			{"company": self.company, "is_cancelled": 0, "docstatus": 1},
 			[{"MIN": "posting_date"}],
+			order_by=None,
 		)
 
 		self.from_date = first_posting_date or self.to_date
